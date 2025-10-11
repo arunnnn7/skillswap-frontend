@@ -7,7 +7,7 @@ export default function VideoCall() {
   const { roomId } = useParams();
   const loc = useLocation();
 
-  // fallback for query params
+  // Fallback for query params
   const searchParams = new URLSearchParams(loc.search);
   const qsMatchId = searchParams.get('matchId');
   const qsPartnerName = searchParams.get('partnerName');
@@ -28,31 +28,37 @@ export default function VideoCall() {
   const [videoOff, setVideoOff] = useState(false);
   const [duration, setDuration] = useState('00:00');
 
+  // Compute socket URL from env variables
+  let SOCKET_URL = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL || '';
+  if (!SOCKET_URL) SOCKET_URL = typeof window !== 'undefined' ? window.location.origin : '';
+  if (SOCKET_URL && typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    SOCKET_URL = SOCKET_URL.replace(/^http:\/\//i, 'https://').replace(/^ws:\/\//i, 'wss://');
+  }
+
   useEffect(() => {
     async function init() {
       try {
         setStatus('Connecting...');
 
-        // ✅ Use deployed backend
-        socketRef.current = io('https://skillswap-backend-w0b7.onrender.com', {
-          withCredentials: true,
-        });
+        // Connect to backend via SOCKET_URL
+        socketRef.current = io(SOCKET_URL, { withCredentials: true });
         socketRef.current.emit('join-room', { roomId, userId: 'me' });
 
         // Get local media
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         localRef.current.srcObject = stream;
 
-        // Peer connection with STUN server
+        // Peer connection with STUN servers
         const pc = new RTCPeerConnection({
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' }
+          ]
         });
         pcRef.current = pc;
 
         stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
         pc.ontrack = e => { remoteRef.current.srcObject = e.streams[0]; };
-
         pc.onicecandidate = e => {
           if (e.candidate) socketRef.current.emit('signal', { roomId, data: { candidate: e.candidate } });
         };
@@ -71,15 +77,12 @@ export default function VideoCall() {
           }
         });
 
-        // Create offer if first in room
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         socketRef.current.emit('signal', { roomId, data: { sdp: pc.localDescription } });
 
-        // mark connected & start call timer
         setStatus('Connected');
-        const now = Date.now();
-        startedAtRef.current = now;
+        startedAtRef.current = Date.now();
         timerRef.current = setInterval(() => {
           const s = Math.floor((Date.now() - startedAtRef.current) / 1000);
           const mm = String(Math.floor(s / 60)).padStart(2, '0');
@@ -97,11 +100,11 @@ export default function VideoCall() {
 
     return () => {
       clearInterval(timerRef.current);
-      try { localRef.current?.srcObject?.getTracks().forEach(t => t.stop()); } catch (e) {}
+      try { localRef.current?.srcObject?.getTracks().forEach(t => t.stop()); } catch(e) {}
       socketRef.current?.disconnect();
       pcRef.current?.close();
     };
-  }, [roomId]);
+  }, [roomId, SOCKET_URL]);
 
   const toggleMute = () => {
     setMuted(prev => {
