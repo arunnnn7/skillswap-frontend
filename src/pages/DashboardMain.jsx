@@ -1,7 +1,16 @@
 import React, { useEffect, useState, useRef } from 'react'
 import API from '../lib/api'
 import { io } from 'socket.io-client'
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL
+// Compute socket URL safely for deployed environment
+let SOCKET_URL = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL || ''
+if (!SOCKET_URL) {
+  // fallback to current origin
+  SOCKET_URL = typeof window !== 'undefined' ? window.location.origin : ''
+}
+// ensure secure websocket when site is served over HTTPS
+if (SOCKET_URL && typeof window !== 'undefined' && window.location.protocol === 'https:' ){
+  SOCKET_URL = SOCKET_URL.replace(/^http:\/\//i, 'https://').replace(/^ws:\/\//i, 'wss://')
+}
 
 export default function DashboardMain(){
   const [loading, setLoading] = useState(true)

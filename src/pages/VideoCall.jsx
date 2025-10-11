@@ -3,7 +3,14 @@ import { useParams, useLocation } from 'react-router-dom'
 import API from '../lib/api'
 import { io } from 'socket.io-client'
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL
+// Compute socket URL safely for deployed environment
+let SOCKET_URL = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL || ''
+if (!SOCKET_URL) {
+  SOCKET_URL = typeof window !== 'undefined' ? window.location.origin : ''
+}
+if (SOCKET_URL && typeof window !== 'undefined' && window.location.protocol === 'https:'){
+  SOCKET_URL = SOCKET_URL.replace(/^http:\/\//i, 'https://').replace(/^ws:\/\//i, 'wss://')
+}
 
 export default function VideoCall(){
   const { roomId } = useParams()
