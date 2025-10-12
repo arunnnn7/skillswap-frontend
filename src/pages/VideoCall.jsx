@@ -319,7 +319,7 @@ export default function VideoCall() {
         const socket = io(SOCKET_URL, {
           withCredentials: true,
           transports: ['websocket', 'polling'],
-          timeout: 10000
+          timeout: 100000000
         });
 
         socketRef.current = socket;
