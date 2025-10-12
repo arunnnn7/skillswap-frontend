@@ -26,6 +26,7 @@ export default function VideoCall() {
   const timerRef = useRef();
   const startedAtRef = useRef();
   const localStreamRef = useRef();
+  const connectionTimeoutRef = useRef();
 
   const [status, setStatus] = useState('Initializing...');
   const [rating, setRating] = useState(5);
@@ -34,13 +35,16 @@ export default function VideoCall() {
   const [duration, setDuration] = useState('00:00');
   const [mediaError, setMediaError] = useState('');
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend-w0b7.onrender.com';
-  // Initialize media
+  const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend-w0b7.onrender.com';
+
+  // HTTPS check
   useEffect(() => {
-  if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-    console.warn('Video calling requires HTTPS for media permissions');
-  }
-}, []);
+    if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
+      console.warn('Video calling requires HTTPS for media permissions');
+    }
+  }, []);
+
+  // Initialize media
   const initializeMedia = async () => {
     try {
       setStatus('Requesting camera and microphone...');
@@ -87,7 +91,7 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
     }
   };
 
-  // Initialize WebRTC
+  // Initialize WebRTC - FIXED VERSION
   const initializeWebRTC = async (stream) => {
     try {
       setStatus('Setting up WebRTC...');
@@ -95,51 +99,77 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
       const pc = new RTCPeerConnection({
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ]
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' }
+        ],
+        iceCandidatePoolSize: 10
       });
 
       pcRef.current = pc;
 
-      // Add local tracks
+      // Add local tracks with error handling
       stream.getTracks().forEach(track => {
-        pc.addTrack(track, stream);
+        console.log('Adding local track:', track.kind, track.id);
+        try {
+          pc.addTrack(track, stream);
+        } catch (addError) {
+          console.error('Error adding track:', addError);
+        }
       });
 
-      // Handle remote stream
+      // Handle remote stream - IMPROVED
       pc.ontrack = (event) => {
-        console.log('✅ Received remote stream!');
+        console.log('✅ Received remote stream with tracks:', event.streams[0]?.getTracks().length);
+        console.log('Remote tracks:', event.streams[0]?.getTracks().map(t => t.kind));
+        
         if (remoteRef.current && event.streams[0]) {
           remoteRef.current.srcObject = event.streams[0];
-          remoteRef.current.play().catch(e => console.error('Remote play error:', e));
+          remoteRef.current.onloadedmetadata = () => {
+            remoteRef.current.play().catch(e => console.error('Remote play error:', e));
+          };
           setStatus('Connected ✅');
         }
       };
 
-      // Handle ICE candidates
+      // Handle ICE candidates - IMPROVED
       pc.onicecandidate = (event) => {
-        if (event.candidate && socketRef.current) {
-          console.log('Sending ICE candidate');
+        if (event.candidate && socketRef.current?.connected) {
+          console.log('📤 Sending ICE candidate');
           socketRef.current.emit('webrtc-signal', {
             roomId,
             type: 'candidate',
             candidate: event.candidate
           });
+        } else if (!event.candidate) {
+          console.log('✅ All ICE candidates gathered');
         }
       };
 
-      // Connection state monitoring
+      // Better connection monitoring
       pc.onconnectionstatechange = () => {
-        console.log('Connection state:', pc.connectionState);
-        setStatus(pc.connectionState.charAt(0).toUpperCase() + pc.connectionState.slice(1));
+        const state = pc.connectionState;
+        console.log('Connection state:', state);
+        setStatus(state.charAt(0).toUpperCase() + state.slice(1));
         
-        if (pc.connectionState === 'connected') {
-          console.log('✅ WebRTC connection established!');
+        if (state === 'connected') {
+          console.log('🎉 WebRTC fully connected!');
+          clearTimeout(connectionTimeoutRef.current);
+        } else if (state === 'failed') {
+          console.log('❌ WebRTC connection failed');
+          setStatus('Connection failed - try refreshing');
         }
       };
 
       pc.oniceconnectionstatechange = () => {
         console.log('ICE connection state:', pc.iceConnectionState);
+      };
+
+      // Handle negotiation needed - FOR CALLER
+      pc.onnegotiationneeded = async () => {
+        console.log('🔄 Negotiation needed');
+        if (callState.isCaller) {
+          setTimeout(() => createOffer(), 1000);
+        }
       };
 
       return pc;
@@ -164,6 +194,7 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
 
         socket.on('connect', () => {
           console.log('✅ Socket connected:', socket.id);
+          console.log('Backend URL:', SOCKET_URL);
           
           // Register user
           const userId = localStorage.getItem('userId');
@@ -188,7 +219,7 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
           reject(error);
         });
 
-        // WebRTC Signaling - NEW IMPROVED VERSION
+        // WebRTC Signaling - IMPROVED VERSION
         socket.on('webrtc-signal', async (data) => {
           console.log('📡 Received WebRTC signal:', data.type);
           
@@ -200,29 +231,43 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
           try {
             if (data.type === 'offer') {
               console.log('📥 Processing offer...');
+              
+              // Set remote description first
               await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
               console.log('✅ Remote description set (offer)');
               
+              // Create and set local answer
               const answer = await pcRef.current.createAnswer();
               await pcRef.current.setLocalDescription(answer);
-              console.log('✅ Answer created');
+              console.log('✅ Answer created and set');
               
+              // Send answer back
               socket.emit('webrtc-signal', {
                 roomId,
                 type: 'answer',
                 answer: pcRef.current.localDescription
               });
-              console.log('📤 Answer sent');
+              console.log('📤 Answer sent back to caller');
               
             } else if (data.type === 'answer') {
               console.log('📥 Processing answer...');
+              
+              // Set remote description for answer
               await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
               console.log('✅ Remote description set (answer)');
               
             } else if (data.type === 'candidate') {
               console.log('📥 Processing ICE candidate...');
-              await pcRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
-              console.log('✅ ICE candidate added');
+              
+              // Add ICE candidate with error handling
+              try {
+                if (data.candidate) {
+                  await pcRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+                  console.log('✅ ICE candidate added successfully');
+                }
+              } catch (iceError) {
+                console.warn('⚠️ Failed to add ICE candidate (usually not critical):', iceError);
+              }
             }
           } catch (error) {
             console.error('❌ Error handling signal:', error);
@@ -272,7 +317,7 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
     });
   };
 
-  // Create offer (for caller)
+  // Create offer (for caller) - IMPROVED
   const createOffer = async () => {
     if (!pcRef.current) {
       console.log('❌ No peer connection for offer');
@@ -281,23 +326,35 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
     
     try {
       console.log('🎯 Creating offer as caller...');
+      
+      // Create offer with better options
       const offer = await pcRef.current.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true
       });
       
+      console.log('✅ Offer created, setting local description...');
       await pcRef.current.setLocalDescription(offer);
-      console.log('✅ Offer created');
+      console.log('✅ Local description set');
       
-      socketRef.current.emit('webrtc-signal', {
-        roomId,
-        type: 'offer',
-        offer: pcRef.current.localDescription
-      });
-      console.log('📤 Offer sent');
+      // Send offer to other peer
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('webrtc-signal', {
+          roomId,
+          type: 'offer',
+          offer: pcRef.current.localDescription
+        });
+        console.log('📤 Offer sent to answerer');
+      } else {
+        console.log('❌ Socket not connected, cannot send offer');
+      }
       
     } catch (error) {
       console.error('❌ Error creating offer:', error);
+      // Retry after delay
+      setTimeout(() => {
+        if (pcRef.current) createOffer();
+      }, 2000);
     }
   };
 
@@ -311,6 +368,7 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
 
         console.log('🚀 Starting call process...');
         console.log('Role:', callState.isCaller ? 'Caller' : 'Answerer');
+        console.log('Room ID:', roomId);
 
         // 1. Initialize media
         const stream = await initializeMedia();
@@ -330,15 +388,26 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
         // 4. Create offer if caller
         if (callState.isCaller) {
           console.log('⏳ Waiting to create offer...');
+          // Give time for everything to initialize
           setTimeout(() => {
-            if (mounted) {
+            if (mounted && pcRef.current) {
               createOffer();
             }
-          }, 2000);
+          }, 3000);
         } else {
           console.log('🎯 Waiting for offer as answerer...');
           setStatus('Waiting for offer...');
         }
+
+        // Set connection timeout
+        connectionTimeoutRef.current = setTimeout(() => {
+          if (mounted && !status.includes('Connected')) {
+            console.log('🕒 Connection timeout, retrying...');
+            if (callState.isCaller && pcRef.current) {
+              createOffer();
+            }
+          }
+        }, 15000);
 
         // Start timer
         startedAtRef.current = Date.now();
@@ -365,13 +434,16 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
       mounted = false;
       console.log('🧹 Cleaning up call...');
       
+      clearTimeout(connectionTimeoutRef.current);
       if (timerRef.current) clearInterval(timerRef.current);
       
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
       
-      if (pcRef.current) pcRef.current.close();
+      if (pcRef.current) {
+        pcRef.current.close();
+      }
       
       if (socketRef.current) {
         socketRef.current.emit('leave-room', { roomId });
@@ -380,7 +452,7 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
     };
   }, [roomId, SOCKET_URL, callState.isCaller]);
 
-  // Control functions (keep your existing)
+  // Control functions
   const toggleMute = () => {
     if (!localStreamRef.current) return;
     const newMuted = !muted;
@@ -401,6 +473,7 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
 
   const endCall = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
+    clearTimeout(connectionTimeoutRef.current);
     
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => track.stop());
@@ -473,6 +546,13 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend
   return (
     <div className="space-y-4 p-4 max-w-4xl mx-auto">
       <h2 className="text-xl font-bold text-gray-800">Video Call</h2>
+
+      {/* Debug info */}
+      <div className="p-2 bg-blue-50 text-xs text-blue-800 rounded">
+        <strong>Debug Info:</strong> Room: {roomId} | Backend: {SOCKET_URL} | 
+        Local Tracks: {localRef.current?.srcObject?.getTracks().length || 0} | 
+        Remote Tracks: {remoteRef.current?.srcObject?.getTracks().length || 0}
+      </div>
 
       <div className="p-4 bg-white rounded-lg shadow border">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
