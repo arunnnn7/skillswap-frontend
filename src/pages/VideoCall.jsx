@@ -12,10 +12,13 @@ export default function VideoCall() {
   const qsMatchId = searchParams.get('matchId');
   const qsPartnerName = searchParams.get('partnerName');
   const qsIsCaller = searchParams.get('isCaller');
+  const qsCallerName = searchParams.get('callerName');
 
+  // Enhanced call state with partner and caller info
   const [callState, setCallState] = useState({
     matchId: loc.state?.matchId || qsMatchId,
-    partner: loc.state?.partner || (qsPartnerName ? { name: qsPartnerName } : { name: 'Partner' }),
+    partner: loc.state?.partner || (qsPartnerName ? { name: qsPartnerName } : { name: 'Loading...' }),
+    caller: loc.state?.caller || (qsCallerName ? { name: qsCallerName } : { name: 'Loading...' }),
     isCaller: loc.state?.isCaller || (qsIsCaller === 'true')
   });
 
@@ -47,14 +50,11 @@ export default function VideoCall() {
 
   // Helper function to get valid user ID
   const getValidUserId = () => {
-    // Try multiple sources for user ID
     let userId = localStorage.getItem('userId');
     
-    // Check if userId is invalid
     if (!userId || userId === 'undefined' || userId === 'null' || userId === 'anonymous') {
       console.warn('Invalid user ID from localStorage:', userId);
       
-      // Try to get from user object
       const userData = localStorage.getItem('user');
       if (userData) {
         try {
@@ -69,7 +69,6 @@ export default function VideoCall() {
         }
       }
       
-      // Generate temporary ID as last resort
       const tempUserId = 'user-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
       console.log('🔄 Generated temporary user ID:', tempUserId);
       localStorage.setItem('userId', tempUserId);
@@ -80,12 +79,49 @@ export default function VideoCall() {
     return userId;
   };
 
+  // Fetch call details including partner information
+  const fetchCallDetails = async () => {
+    try {
+      const matchId = callState.matchId;
+      if (!matchId) {
+        console.log('No match ID available');
+        return;
+      }
+
+      if (callState.isCaller) {
+        // Caller already has partner info from /start endpoint
+        console.log('Caller - Partner:', callState.partner?.name);
+      } else {
+        // Answerer needs to fetch partner/caller info
+        console.log('Answerer - Fetching call details...');
+        const response = await API.post('/api/video/join', {
+          roomId,
+          matchId
+        });
+        
+        if (response.data.success) {
+          setCallState(prev => ({
+            ...prev,
+            partner: response.data.caller, // For answerer, partner is the caller
+            caller: response.data.caller
+          }));
+          console.log('✅ Answerer - Loaded partner info:', response.data.caller.name);
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching call details:', error);
+    }
+  };
+
   // Debug user ID at component start
   useEffect(() => {
     const userId = getValidUserId();
     console.log('🔍 Current User ID:', userId);
     console.log('🔍 Room ID:', roomId);
     console.log('🔍 Call State:', callState);
+    
+    // Fetch call details on component mount
+    fetchCallDetails();
   }, []);
 
   // HTTPS check
@@ -155,7 +191,7 @@ export default function VideoCall() {
     }
   };
 
-  // Initialize WebRTC - FIXED VERSION
+  // Initialize WebRTC
   const initializeWebRTC = async (stream) => {
     try {
       setStatus('Setting up WebRTC...');
@@ -165,7 +201,6 @@ export default function VideoCall() {
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
           { urls: 'stun:stun2.l.google.com:19302' },
-          // TURN servers for relay fallback
           {
             urls: 'turn:openrelay.metered.ca:80',
             username: 'openrelayproject',
@@ -173,11 +208,6 @@ export default function VideoCall() {
           },
           {
             urls: 'turn:openrelay.metered.ca:443',
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
-          },
-          {
-            urls: 'turn:openrelay.metered.ca:443?transport=tcp',
             username: 'openrelayproject',
             credential: 'openrelayproject'
           }
@@ -188,7 +218,7 @@ export default function VideoCall() {
 
       pcRef.current = pc;
 
-      // Add local tracks with error handling
+      // Add local tracks
       stream.getTracks().forEach(track => {
         console.log('Adding local track:', track.kind, track.id);
         try {
@@ -198,10 +228,9 @@ export default function VideoCall() {
         }
       });
 
-      // Handle remote stream - FIXED VERSION
+      // Handle remote stream
       pc.ontrack = (event) => {
         console.log('✅ Received remote track:', event.track.kind, event.track.id);
-        console.log('Remote streams:', event.streams);
         
         if (event.streams && event.streams[0]) {
           const remoteStream = event.streams[0];
@@ -214,7 +243,6 @@ export default function VideoCall() {
               });
             };
             
-            // Force play after a short delay
             setTimeout(() => {
               if (remoteRef.current && remoteRef.current.paused) {
                 remoteRef.current.play().catch(console.error);
@@ -229,13 +257,12 @@ export default function VideoCall() {
         }
       };
 
-      // Handle ICE candidates - IMPROVED
+      // Handle ICE candidates
       pc.onicecandidate = (event) => {
         updateDebugInfo();
         
         if (event.candidate) {
-          console.log('📤 Sending ICE candidate:', event.candidate.type);
-          // Small delay to ensure socket is ready
+          console.log('📤 Sending ICE candidate');
           setTimeout(() => {
             if (socketRef.current?.connected) {
               socketRef.current.emit('webrtc-signal', {
@@ -245,24 +272,10 @@ export default function VideoCall() {
               });
             }
           }, 100);
-        } else {
-          console.log('✅ All ICE candidates gathered');
         }
       };
 
-      // ICE gathering state monitoring
-      pc.onicegatheringstatechange = () => {
-        console.log('ICE gathering state:', pc.iceGatheringState);
-        updateDebugInfo();
-      };
-
-      // Signaling state monitoring
-      pc.onsignalingstatechange = () => {
-        console.log('Signaling state:', pc.signalingState);
-        updateDebugInfo();
-      };
-
-      // ICE connection state monitoring
+      // Connection state monitoring
       pc.oniceconnectionstatechange = () => {
         console.log('ICE connection state:', pc.iceConnectionState);
         updateDebugInfo();
@@ -284,7 +297,6 @@ export default function VideoCall() {
         }
       };
 
-      // Better connection state handling
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
         console.log('Connection state changed:', state);
@@ -296,9 +308,6 @@ export default function VideoCall() {
             clearTimeout(connectionTimeoutRef.current);
             retryCountRef.current = 0;
             break;
-          case 'disconnected':
-            setStatus('Disconnected - Reconnecting...');
-            break;
           case 'failed':
             console.log('❌ Connection failed');
             setStatus('Connection failed - Retrying...');
@@ -309,13 +318,12 @@ export default function VideoCall() {
         }
       };
 
-      // Handle negotiation needed - FOR CALLER
+      // Handle negotiation needed
       pc.onnegotiationneeded = async () => {
         console.log('🔄 Negotiation needed, caller:', callState.isCaller);
         updateDebugInfo();
         
         if (callState.isCaller && !offerSentRef.current) {
-          // Wait a bit for everything to stabilize
           setTimeout(() => {
             if (pcRef.current && pcRef.current.signalingState === 'stable') {
               createOffer();
@@ -343,19 +351,18 @@ export default function VideoCall() {
         if (callState.isCaller && pcRef.current) {
           createOffer();
         } else if (!callState.isCaller) {
-          // Answerer can request offer if it hasn't been received
           setStatus('Requesting offer...');
           if (socketRef.current) {
             socketRef.current.emit('request-offer', { roomId });
           }
         }
-      }, 2000 * retryCountRef.current); // Exponential backoff
+      }, 2000 * retryCountRef.current);
     } else {
       setStatus('Max retries exceeded - Please refresh');
     }
   };
 
-  // Initialize Socket - FIXED USER ID ISSUE
+  // Initialize Socket
   const initializeSocket = () => {
     return new Promise((resolve, reject) => {
       try {
@@ -369,18 +376,15 @@ export default function VideoCall() {
 
         socket.on('connect', () => {
           console.log('✅ Socket connected:', socket.id);
-          console.log('Backend URL:', SOCKET_URL);
           
-          // Register user with VALID user ID
           const userId = getValidUserId();
           if (userId) {
             socket.emit('register-user', { userId });
             console.log('✅ User registered with ID:', userId);
             
-            // Join room with VALID user ID
             socket.emit('join-room', { 
               roomId, 
-              userId: userId // Use actual user ID, not 'anonymous'
+              userId: userId
             });
             console.log('✅ Joined room:', roomId, 'with user:', userId);
           } else {
@@ -417,12 +421,11 @@ export default function VideoCall() {
           console.log('👤 Partner joined room:', data);
           if (callState.isCaller && !offerSentRef.current) {
             setStatus('Partner joined - Starting call...');
-            // Give a moment then create offer
             setTimeout(() => createOffer(), 1000);
           }
         });
 
-        // WebRTC Signaling - IMPROVED VERSION
+        // WebRTC Signaling
         socket.on('webrtc-signal', async (data) => {
           console.log('📡 Received WebRTC signal:', data.type);
           updateDebugInfo();
@@ -437,16 +440,13 @@ export default function VideoCall() {
               console.log('📥 Processing offer...');
               setStatus('Received offer - Connecting...');
               
-              // Set remote description first
               await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
               console.log('✅ Remote description set (offer)');
               
-              // Create and set local answer
               const answer = await pcRef.current.createAnswer();
               await pcRef.current.setLocalDescription(answer);
               console.log('✅ Answer created and set');
               
-              // Send answer back
               socket.emit('webrtc-signal', {
                 roomId,
                 type: 'answer',
@@ -458,21 +458,19 @@ export default function VideoCall() {
               console.log('📥 Processing answer...');
               setStatus('Received answer - Finalizing...');
               
-              // Set remote description for answer
               await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
               console.log('✅ Remote description set (answer)');
               
             } else if (data.type === 'candidate') {
               console.log('📥 Processing ICE candidate...');
               
-              // Add ICE candidate with error handling
               try {
                 if (data.candidate) {
                   await pcRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
                   console.log('✅ ICE candidate added successfully');
                 }
               } catch (iceError) {
-                console.warn('⚠️ Failed to add ICE candidate (usually not critical):', iceError);
+                console.warn('⚠️ Failed to add ICE candidate:', iceError);
               }
             }
           } catch (error) {
@@ -481,7 +479,7 @@ export default function VideoCall() {
           }
         });
 
-        // Request for offer (answerer requesting offer from caller)
+        // Request for offer
         socket.on('offer-requested', (data) => {
           console.log('📨 Offer requested by partner');
           if (callState.isCaller && pcRef.current && !offerSentRef.current) {
@@ -490,18 +488,45 @@ export default function VideoCall() {
           }
         });
 
-        // Incoming call notification
-        socket.on('incoming-call', (data) => {
-          console.log('📞 Incoming call received:', data);
-          // Auto-join the call for now
-          const userId = getValidUserId();
-          socket.emit('join-room', { roomId: data.roomId, userId });
+        // User info exchange - NEW EVENT
+        socket.on('user-info', (data) => {
+          console.log('👤 Received user info:', data);
+          if (data.userId !== getValidUserId()) {
+            setCallState(prev => ({
+              ...prev,
+              partner: {
+                name: data.userName || 'Partner',
+                id: data.userId
+              }
+            }));
+            console.log('✅ Updated partner info:', data.userName);
+          }
         });
 
-        // Room events
+        // Share user info with partner
         socket.on('user-joined', (data) => {
           console.log('👤 User joined room:', data);
           setStatus('Partner joined - Connecting...');
+          
+          // Share our user info with the new user
+          const userId = getValidUserId();
+          const userData = localStorage.getItem('user');
+          let userName = 'You';
+          
+          if (userData) {
+            try {
+              const user = JSON.parse(userData);
+              userName = user.name || 'You';
+            } catch (e) {
+              console.error('Error parsing user data:', e);
+            }
+          }
+          
+          socket.emit('share-user-info', {
+            roomId,
+            userId: userId,
+            userName: userName
+          });
         });
 
         socket.on('user-left', (data) => {
@@ -509,16 +534,9 @@ export default function VideoCall() {
           setStatus('Partner disconnected');
         });
 
-        // Error events
         socket.on('join-error', (data) => {
           console.error('❌ Failed to join room:', data.error);
-          setStatus('Error: Failed to join call - please refresh');
-        });
-
-        socket.on('auth-error', (data) => {
-          console.error('❌ Authentication error:', data.error);
-          setStatus('Error: Authentication failed - please log in again');
-          setTimeout(() => navigate('/login'), 3000);
+          setStatus('Error: Failed to join call');
         });
 
       } catch (error) {
@@ -527,7 +545,7 @@ export default function VideoCall() {
     });
   };
 
-  // Create offer (for caller) - IMPROVED
+  // Create offer
   const createOffer = async () => {
     if (!pcRef.current) {
       console.log('❌ No peer connection for offer');
@@ -544,7 +562,6 @@ export default function VideoCall() {
       setStatus('Creating offer...');
       offerSentRef.current = true;
       
-      // Create offer with better options
       const offer = await pcRef.current.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true
@@ -554,7 +571,6 @@ export default function VideoCall() {
       await pcRef.current.setLocalDescription(offer);
       console.log('✅ Local description set');
       
-      // Send offer to other peer
       if (socketRef.current?.connected) {
         socketRef.current.emit('webrtc-signal', {
           roomId,
@@ -575,7 +591,6 @@ export default function VideoCall() {
       setStatus('Offer failed - Retrying...');
       offerSentRef.current = false;
       
-      // Retry after delay with exponential backoff
       setTimeout(() => {
         if (pcRef.current && retryCountRef.current < MAX_RETRIES) {
           createOffer();
@@ -596,17 +611,15 @@ export default function VideoCall() {
     if (callState.isCaller && pcRef.current) {
       await createOffer();
     } else if (!callState.isCaller && socketRef.current) {
-      // Answerer can request offer
       socketRef.current.emit('request-offer', { roomId });
       setStatus('Requesting offer from partner...');
     }
   };
 
-  // Main useEffect - FIXED USER ID VALIDATION
+  // Main useEffect
   useEffect(() => {
     let mounted = true;
 
-    // Validate user is logged in first
     const userId = getValidUserId();
     if (!userId) {
       setStatus('Error: Please log in first');
@@ -622,23 +635,20 @@ export default function VideoCall() {
         console.log('Role:', callState.isCaller ? 'Caller' : 'Answerer');
         console.log('Room ID:', roomId);
         console.log('User ID:', userId);
+        console.log('Partner:', callState.partner?.name);
 
-        // 1. Initialize media
         const stream = await initializeMedia();
         if (!mounted) {
           stream.getTracks().forEach(track => track.stop());
           return;
         }
 
-        // 2. Initialize socket
         await initializeSocket();
         if (!mounted) return;
 
-        // 3. Initialize WebRTC
         await initializeWebRTC(stream);
         if (!mounted) return;
 
-        // Set connection timeout
         connectionTimeoutRef.current = setTimeout(() => {
           if (mounted && !status.includes('Connected') && retryCountRef.current < MAX_RETRIES) {
             console.log('🕒 Connection timeout, retrying...');
@@ -646,7 +656,6 @@ export default function VideoCall() {
           }
         }, 15000);
 
-        // Start timer
         startedAtRef.current = Date.now();
         timerRef.current = setInterval(() => {
           if (mounted && startedAtRef.current) {
@@ -742,32 +751,26 @@ export default function VideoCall() {
     setStatus('Retrying media...');
     
     try {
-      // Stop old tracks
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
       
-      // Get new media stream
       const stream = await initializeMedia();
       localStreamRef.current = stream;
       
-      // Update local video element
       if (localRef.current) {
         localRef.current.srcObject = stream;
       }
       
-      // Replace tracks in peer connection
       if (pcRef.current) {
         const senders = pcRef.current.getSenders();
         
-        // Replace audio track
         const audioTrack = stream.getAudioTracks()[0];
         const audioSender = senders.find(s => s.track?.kind === 'audio');
         if (audioSender && audioTrack) {
           await audioSender.replaceTrack(audioTrack);
         }
         
-        // Replace video track  
         const videoTrack = stream.getVideoTracks()[0];
         const videoSender = senders.find(s => s.track?.kind === 'video');
         if (videoSender && videoTrack) {
@@ -798,6 +801,14 @@ export default function VideoCall() {
     }
   };
 
+  // Get display name for partner
+  const getPartnerDisplayName = () => {
+    if (callState.partner?.name && callState.partner.name !== 'Loading...') {
+      return callState.partner.name;
+    }
+    return callState.isCaller ? 'Partner' : 'Caller';
+  };
+
   return (
     <div className="space-y-4 p-4 max-w-4xl mx-auto">
       <h2 className="text-xl font-bold text-gray-800">Video Call</h2>
@@ -815,7 +826,7 @@ export default function VideoCall() {
       <div className="p-4 bg-white rounded-lg shadow border">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <div className="text-sm">
-            <span className="font-medium">Partner:</span> {callState.partner?.name}
+            <span className="font-medium">Partner:</span> {getPartnerDisplayName()}
           </div>
           <div className="text-sm">
             <span className="font-medium">Role:</span> {callState.isCaller ? 'Caller' : 'Answerer'}
@@ -859,7 +870,7 @@ export default function VideoCall() {
             className="w-full h-64 md:h-80 object-cover bg-gray-900"
           />
           <div className="bg-gray-800 text-white text-center p-2 text-sm">
-            {callState.partner?.name} {status === 'Connected ✅' && '🔊'}
+            {getPartnerDisplayName()} {status === 'Connected ✅' && '🔊'}
             {!remoteRef.current?.srcObject && ' (Waiting for video...)'}
           </div>
         </div>
