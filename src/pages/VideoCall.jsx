@@ -28,6 +28,7 @@ export default function VideoCall() {
   const localStreamRef = useRef();
   const connectionTimeoutRef = useRef();
   const retryCountRef = useRef(0);
+  const offerSentRef = useRef(false);
 
   const [status, setStatus] = useState('Initializing...');
   const [rating, setRating] = useState(5);
@@ -157,17 +158,10 @@ export default function VideoCall() {
       // Handle remote stream - FIXED VERSION
       pc.ontrack = (event) => {
         console.log('✅ Received remote track:', event.track.kind, event.track.id);
+        console.log('Remote streams:', event.streams);
         
         if (event.streams && event.streams[0]) {
           const remoteStream = event.streams[0];
-          
-          // Listen for track additions to this stream
-          remoteStream.onaddtrack = () => {
-            console.log('📹 Track added to remote stream');
-            if (remoteRef.current) {
-              remoteRef.current.srcObject = remoteStream;
-            }
-          };
           
           if (remoteRef.current) {
             remoteRef.current.srcObject = remoteStream;
@@ -188,6 +182,7 @@ export default function VideoCall() {
           setStatus('Connected ✅');
           clearTimeout(connectionTimeoutRef.current);
           retryCountRef.current = 0;
+          console.log('🎉 WebRTC connection established!');
         }
       };
 
@@ -231,6 +226,7 @@ export default function VideoCall() {
         
         switch (pc.iceConnectionState) {
           case 'connected':
+          case 'completed':
             setStatus('Connected ✅');
             clearTimeout(connectionTimeoutRef.current);
             break;
@@ -275,7 +271,7 @@ export default function VideoCall() {
         console.log('🔄 Negotiation needed, caller:', callState.isCaller);
         updateDebugInfo();
         
-        if (callState.isCaller) {
+        if (callState.isCaller && !offerSentRef.current) {
           // Wait a bit for everything to stabilize
           setTimeout(() => {
             if (pcRef.current && pcRef.current.signalingState === 'stable') {
@@ -303,6 +299,12 @@ export default function VideoCall() {
       setTimeout(() => {
         if (callState.isCaller && pcRef.current) {
           createOffer();
+        } else if (!callState.isCaller) {
+          // Answerer can request offer if it hasn't been received
+          setStatus('Requesting offer...');
+          if (socketRef.current) {
+            socketRef.current.emit('request-offer', { roomId });
+          }
         }
       }, 2000 * retryCountRef.current); // Exponential backoff
     } else {
@@ -354,6 +356,22 @@ export default function VideoCall() {
           setStatus('Disconnected - Reconnecting...');
         });
 
+        // Room joined successfully
+        socket.on('joined-room', (data) => {
+          console.log('✅ Successfully joined room:', data);
+          setStatus(callState.isCaller ? 'Ready to call...' : 'Waiting for offer...');
+        });
+
+        // Partner joined the room
+        socket.on('partner-joined', (data) => {
+          console.log('👤 Partner joined room:', data);
+          if (callState.isCaller && !offerSentRef.current) {
+            setStatus('Partner joined - Starting call...');
+            // Give a moment then create offer
+            setTimeout(() => createOffer(), 1000);
+          }
+        });
+
         // WebRTC Signaling - IMPROVED VERSION
         socket.on('webrtc-signal', async (data) => {
           console.log('📡 Received WebRTC signal:', data.type);
@@ -367,6 +385,7 @@ export default function VideoCall() {
           try {
             if (data.type === 'offer') {
               console.log('📥 Processing offer...');
+              setStatus('Received offer - Connecting...');
               
               // Set remote description first
               await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
@@ -387,6 +406,7 @@ export default function VideoCall() {
               
             } else if (data.type === 'answer') {
               console.log('📥 Processing answer...');
+              setStatus('Received answer - Finalizing...');
               
               // Set remote description for answer
               await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
@@ -411,26 +431,20 @@ export default function VideoCall() {
           }
         });
 
-        // Legacy signal handler (backward compatibility)
-        socket.on('signal', async (data) => {
-          console.log('📡 Received legacy signal');
-          if (!pcRef.current) return;
-
-          try {
-            if (data.sdp) {
-              await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.sdp));
-              if (data.sdp.type === 'offer') {
-                const answer = await pcRef.current.createAnswer();
-                await pcRef.current.setLocalDescription(answer);
-                socket.emit('signal', { roomId, data: { sdp: pcRef.current.localDescription } });
-              }
-            }
-            if (data.candidate) {
-              await pcRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
-            }
-          } catch (error) {
-            console.error('Error handling legacy signal:', error);
+        // Request for offer (answerer requesting offer from caller)
+        socket.on('offer-requested', (data) => {
+          console.log('📨 Offer requested by partner');
+          if (callState.isCaller && pcRef.current && !offerSentRef.current) {
+            setStatus('Partner requesting offer - Sending...');
+            createOffer();
           }
+        });
+
+        // Incoming call notification
+        socket.on('incoming-call', (data) => {
+          console.log('📞 Incoming call received:', data);
+          // Auto-join the call for now
+          socket.emit('join-room', { roomId: data.roomId, userId: localStorage.getItem('userId') });
         });
 
         // Room events
@@ -442,11 +456,6 @@ export default function VideoCall() {
         socket.on('user-left', (data) => {
           console.log('👤 User left room:', data);
           setStatus('Partner disconnected');
-        });
-
-        socket.on('joined-room', (data) => {
-          console.log('✅ Successfully joined room');
-          setStatus(callState.isCaller ? 'Ready to call...' : 'Waiting for offer...');
         });
 
       } catch (error) {
@@ -462,15 +471,20 @@ export default function VideoCall() {
       return;
     }
     
+    if (offerSentRef.current) {
+      console.log('⚠️ Offer already sent, skipping...');
+      return;
+    }
+    
     try {
       console.log('🎯 Creating offer as caller...');
       setStatus('Creating offer...');
+      offerSentRef.current = true;
       
       // Create offer with better options
       const offer = await pcRef.current.createOffer({
         offerToReceiveAudio: true,
-        offerToReceiveVideo: true,
-        iceRestart: true
+        offerToReceiveVideo: true
       });
       
       console.log('✅ Offer created, setting local description...');
@@ -489,12 +503,14 @@ export default function VideoCall() {
       } else {
         console.log('❌ Socket not connected, cannot send offer');
         setStatus('Socket error - Retrying...');
+        offerSentRef.current = false;
         setTimeout(() => createOffer(), 2000);
       }
       
     } catch (error) {
       console.error('❌ Error creating offer:', error);
       setStatus('Offer failed - Retrying...');
+      offerSentRef.current = false;
       
       // Retry after delay with exponential backoff
       setTimeout(() => {
@@ -512,9 +528,14 @@ export default function VideoCall() {
     }
     
     setStatus('Manual reconnection...');
+    offerSentRef.current = false;
     
     if (callState.isCaller && pcRef.current) {
       await createOffer();
+    } else if (!callState.isCaller && socketRef.current) {
+      // Answerer can request offer
+      socketRef.current.emit('request-offer', { roomId });
+      setStatus('Requesting offer from partner...');
     }
   };
 
@@ -545,29 +566,11 @@ export default function VideoCall() {
         await initializeWebRTC(stream);
         if (!mounted) return;
 
-        // 4. Create offer if caller
-        if (callState.isCaller) {
-          console.log('⏳ Waiting to create offer...');
-          setStatus('Preparing to call...');
-          
-          // Give time for everything to initialize
-          setTimeout(() => {
-            if (mounted && pcRef.current) {
-              createOffer();
-            }
-          }, 3000);
-        } else {
-          console.log('🎯 Waiting for offer as answerer...');
-          setStatus('Waiting for offer...');
-        }
-
         // Set connection timeout
         connectionTimeoutRef.current = setTimeout(() => {
           if (mounted && !status.includes('Connected') && retryCountRef.current < MAX_RETRIES) {
             console.log('🕒 Connection timeout, retrying...');
-            if (callState.isCaller && pcRef.current) {
-              createOffer();
-            }
+            manualReconnect();
           }
         }, 15000);
 
