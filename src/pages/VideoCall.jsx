@@ -45,6 +45,49 @@ export default function VideoCall() {
   const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend-w0b7.onrender.com';
   const MAX_RETRIES = 3;
 
+  // Helper function to get valid user ID
+  const getValidUserId = () => {
+    // Try multiple sources for user ID
+    let userId = localStorage.getItem('userId');
+    
+    // Check if userId is invalid
+    if (!userId || userId === 'undefined' || userId === 'null' || userId === 'anonymous') {
+      console.warn('Invalid user ID from localStorage:', userId);
+      
+      // Try to get from user object
+      const userData = localStorage.getItem('user');
+      if (userData) {
+        try {
+          const user = JSON.parse(userData);
+          if (user && user._id) {
+            console.log('✅ Found valid user ID from user object:', user._id);
+            localStorage.setItem('userId', user._id);
+            return user._id;
+          }
+        } catch (e) {
+          console.error('Failed to parse user data:', e);
+        }
+      }
+      
+      // Generate temporary ID as last resort
+      const tempUserId = 'user-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+      console.log('🔄 Generated temporary user ID:', tempUserId);
+      localStorage.setItem('userId', tempUserId);
+      return tempUserId;
+    }
+    
+    console.log('✅ Using valid user ID:', userId);
+    return userId;
+  };
+
+  // Debug user ID at component start
+  useEffect(() => {
+    const userId = getValidUserId();
+    console.log('🔍 Current User ID:', userId);
+    console.log('🔍 Room ID:', roomId);
+    console.log('🔍 Call State:', callState);
+  }, []);
+
   // HTTPS check
   useEffect(() => {
     if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
@@ -312,14 +355,14 @@ export default function VideoCall() {
     }
   };
 
-  // Initialize Socket
+  // Initialize Socket - FIXED USER ID ISSUE
   const initializeSocket = () => {
     return new Promise((resolve, reject) => {
       try {
         const socket = io(SOCKET_URL, {
           withCredentials: true,
           transports: ['websocket', 'polling'],
-          timeout: 100000000
+          timeout: 10000
         });
 
         socketRef.current = socket;
@@ -328,19 +371,24 @@ export default function VideoCall() {
           console.log('✅ Socket connected:', socket.id);
           console.log('Backend URL:', SOCKET_URL);
           
-          // Register user
-          const userId = localStorage.getItem('userId');
+          // Register user with VALID user ID
+          const userId = getValidUserId();
           if (userId) {
             socket.emit('register-user', { userId });
-            console.log('✅ User registered:', userId);
+            console.log('✅ User registered with ID:', userId);
+            
+            // Join room with VALID user ID
+            socket.emit('join-room', { 
+              roomId, 
+              userId: userId // Use actual user ID, not 'anonymous'
+            });
+            console.log('✅ Joined room:', roomId, 'with user:', userId);
+          } else {
+            console.error('❌ No valid user ID available');
+            setStatus('Error: User authentication failed');
+            reject(new Error('No valid user ID'));
+            return;
           }
-          
-          // Join room
-          socket.emit('join-room', { 
-            roomId, 
-            userId: userId || 'anonymous'
-          });
-          console.log('✅ Joined room:', roomId);
           
           resolve(socket);
         });
@@ -359,6 +407,8 @@ export default function VideoCall() {
         // Room joined successfully
         socket.on('joined-room', (data) => {
           console.log('✅ Successfully joined room:', data);
+          const userId = getValidUserId();
+          console.log('👤 Current user ID:', userId, 'Users in room:', data.usersInRoom);
           setStatus(callState.isCaller ? 'Ready to call...' : 'Waiting for offer...');
         });
 
@@ -444,7 +494,8 @@ export default function VideoCall() {
         socket.on('incoming-call', (data) => {
           console.log('📞 Incoming call received:', data);
           // Auto-join the call for now
-          socket.emit('join-room', { roomId: data.roomId, userId: localStorage.getItem('userId') });
+          const userId = getValidUserId();
+          socket.emit('join-room', { roomId: data.roomId, userId });
         });
 
         // Room events
@@ -456,6 +507,18 @@ export default function VideoCall() {
         socket.on('user-left', (data) => {
           console.log('👤 User left room:', data);
           setStatus('Partner disconnected');
+        });
+
+        // Error events
+        socket.on('join-error', (data) => {
+          console.error('❌ Failed to join room:', data.error);
+          setStatus('Error: Failed to join call - please refresh');
+        });
+
+        socket.on('auth-error', (data) => {
+          console.error('❌ Authentication error:', data.error);
+          setStatus('Error: Authentication failed - please log in again');
+          setTimeout(() => navigate('/login'), 3000);
         });
 
       } catch (error) {
@@ -539,9 +602,17 @@ export default function VideoCall() {
     }
   };
 
-  // Main useEffect
+  // Main useEffect - FIXED USER ID VALIDATION
   useEffect(() => {
     let mounted = true;
+
+    // Validate user is logged in first
+    const userId = getValidUserId();
+    if (!userId) {
+      setStatus('Error: Please log in first');
+      setTimeout(() => navigate('/login'), 2000);
+      return;
+    }
 
     const startCall = async () => {
       try {
@@ -550,6 +621,7 @@ export default function VideoCall() {
         console.log('🚀 Starting call process...');
         console.log('Role:', callState.isCaller ? 'Caller' : 'Answerer');
         console.log('Room ID:', roomId);
+        console.log('User ID:', userId);
 
         // 1. Initialize media
         const stream = await initializeMedia();
@@ -611,7 +683,8 @@ export default function VideoCall() {
       }
       
       if (socketRef.current) {
-        socketRef.current.emit('leave-room', { roomId });
+        const userId = getValidUserId();
+        socketRef.current.emit('leave-room', { roomId, userId });
         socketRef.current.disconnect();
       }
     };
@@ -645,7 +718,8 @@ export default function VideoCall() {
     }
     
     if (socketRef.current) {
-      socketRef.current.emit('leave-room', { roomId });
+      const userId = getValidUserId();
+      socketRef.current.emit('leave-room', { roomId, userId });
       socketRef.current.disconnect();
     }
     
