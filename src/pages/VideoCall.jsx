@@ -27,6 +27,7 @@ export default function VideoCall() {
   const startedAtRef = useRef();
   const localStreamRef = useRef();
   const connectionTimeoutRef = useRef();
+  const retryCountRef = useRef(0);
 
   const [status, setStatus] = useState('Initializing...');
   const [rating, setRating] = useState(5);
@@ -34,8 +35,14 @@ export default function VideoCall() {
   const [videoOff, setVideoOff] = useState(false);
   const [duration, setDuration] = useState('00:00');
   const [mediaError, setMediaError] = useState('');
+  const [debugInfo, setDebugInfo] = useState({
+    signalingState: 'none',
+    iceState: 'none',
+    connectionState: 'none'
+  });
 
   const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend-w0b7.onrender.com';
+  const MAX_RETRIES = 3;
 
   // HTTPS check
   useEffect(() => {
@@ -43,6 +50,17 @@ export default function VideoCall() {
       console.warn('Video calling requires HTTPS for media permissions');
     }
   }, []);
+
+  // Update debug info
+  const updateDebugInfo = () => {
+    if (pcRef.current) {
+      setDebugInfo({
+        signalingState: pcRef.current.signalingState,
+        iceState: pcRef.current.iceConnectionState,
+        connectionState: pcRef.current.connectionState
+      });
+    }
+  };
 
   // Initialize media
   const initializeMedia = async () => {
@@ -81,6 +99,8 @@ export default function VideoCall() {
         errorMessage += 'Please allow camera and microphone permissions.';
       } else if (error.name === 'NotFoundError') {
         errorMessage += 'No camera or microphone found.';
+      } else if (error.name === 'NotReadableError') {
+        errorMessage += 'Camera/microphone is already in use by another application.';
       } else {
         errorMessage += `Error: ${error.message}`;
       }
@@ -100,9 +120,26 @@ export default function VideoCall() {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' }
+          { urls: 'stun:stun2.l.google.com:19302' },
+          // TURN servers for relay fallback
+          {
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          }
         ],
-        iceCandidatePoolSize: 10
+        iceCandidatePoolSize: 10,
+        iceTransportPolicy: 'all'
       });
 
       pcRef.current = pc;
@@ -117,58 +154,134 @@ export default function VideoCall() {
         }
       });
 
-      // Handle remote stream - IMPROVED
+      // Handle remote stream - FIXED VERSION
       pc.ontrack = (event) => {
-        console.log('✅ Received remote stream with tracks:', event.streams[0]?.getTracks().length);
-        console.log('Remote tracks:', event.streams[0]?.getTracks().map(t => t.kind));
+        console.log('✅ Received remote track:', event.track.kind, event.track.id);
         
-        if (remoteRef.current && event.streams[0]) {
-          remoteRef.current.srcObject = event.streams[0];
-          remoteRef.current.onloadedmetadata = () => {
-            remoteRef.current.play().catch(e => console.error('Remote play error:', e));
+        if (event.streams && event.streams[0]) {
+          const remoteStream = event.streams[0];
+          
+          // Listen for track additions to this stream
+          remoteStream.onaddtrack = () => {
+            console.log('📹 Track added to remote stream');
+            if (remoteRef.current) {
+              remoteRef.current.srcObject = remoteStream;
+            }
           };
+          
+          if (remoteRef.current) {
+            remoteRef.current.srcObject = remoteStream;
+            remoteRef.current.onloadedmetadata = () => {
+              remoteRef.current.play().catch(e => {
+                console.error('Remote video play error:', e);
+              });
+            };
+            
+            // Force play after a short delay
+            setTimeout(() => {
+              if (remoteRef.current && remoteRef.current.paused) {
+                remoteRef.current.play().catch(console.error);
+              }
+            }, 1000);
+          }
+          
           setStatus('Connected ✅');
+          clearTimeout(connectionTimeoutRef.current);
+          retryCountRef.current = 0;
         }
       };
 
       // Handle ICE candidates - IMPROVED
       pc.onicecandidate = (event) => {
-        if (event.candidate && socketRef.current?.connected) {
-          console.log('📤 Sending ICE candidate');
-          socketRef.current.emit('webrtc-signal', {
-            roomId,
-            type: 'candidate',
-            candidate: event.candidate
-          });
-        } else if (!event.candidate) {
+        updateDebugInfo();
+        
+        if (event.candidate) {
+          console.log('📤 Sending ICE candidate:', event.candidate.type);
+          // Small delay to ensure socket is ready
+          setTimeout(() => {
+            if (socketRef.current?.connected) {
+              socketRef.current.emit('webrtc-signal', {
+                roomId,
+                type: 'candidate',
+                candidate: event.candidate
+              });
+            }
+          }, 100);
+        } else {
           console.log('✅ All ICE candidates gathered');
         }
       };
 
-      // Better connection monitoring
-      pc.onconnectionstatechange = () => {
-        const state = pc.connectionState;
-        console.log('Connection state:', state);
-        setStatus(state.charAt(0).toUpperCase() + state.slice(1));
+      // ICE gathering state monitoring
+      pc.onicegatheringstatechange = () => {
+        console.log('ICE gathering state:', pc.iceGatheringState);
+        updateDebugInfo();
+      };
+
+      // Signaling state monitoring
+      pc.onsignalingstatechange = () => {
+        console.log('Signaling state:', pc.signalingState);
+        updateDebugInfo();
+      };
+
+      // ICE connection state monitoring
+      pc.oniceconnectionstatechange = () => {
+        console.log('ICE connection state:', pc.iceConnectionState);
+        updateDebugInfo();
         
-        if (state === 'connected') {
-          console.log('🎉 WebRTC fully connected!');
-          clearTimeout(connectionTimeoutRef.current);
-        } else if (state === 'failed') {
-          console.log('❌ WebRTC connection failed');
-          setStatus('Connection failed - try refreshing');
+        switch (pc.iceConnectionState) {
+          case 'connected':
+            setStatus('Connected ✅');
+            clearTimeout(connectionTimeoutRef.current);
+            break;
+          case 'disconnected':
+            setStatus('Disconnected - Reconnecting...');
+            break;
+          case 'failed':
+            console.log('❌ ICE connection failed');
+            setStatus('Connection failed - Retrying...');
+            handleConnectionFailure();
+            break;
         }
       };
 
-      pc.oniceconnectionstatechange = () => {
-        console.log('ICE connection state:', pc.iceConnectionState);
+      // Better connection state handling
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        console.log('Connection state changed:', state);
+        updateDebugInfo();
+        
+        switch (state) {
+          case 'connected':
+            setStatus('Connected ✅');
+            clearTimeout(connectionTimeoutRef.current);
+            retryCountRef.current = 0;
+            break;
+          case 'disconnected':
+            setStatus('Disconnected - Reconnecting...');
+            break;
+          case 'failed':
+            console.log('❌ Connection failed');
+            setStatus('Connection failed - Retrying...');
+            handleConnectionFailure();
+            break;
+          default:
+            setStatus(state.charAt(0).toUpperCase() + state.slice(1));
+        }
       };
 
       // Handle negotiation needed - FOR CALLER
       pc.onnegotiationneeded = async () => {
-        console.log('🔄 Negotiation needed');
+        console.log('🔄 Negotiation needed, caller:', callState.isCaller);
+        updateDebugInfo();
+        
         if (callState.isCaller) {
-          setTimeout(() => createOffer(), 1000);
+          // Wait a bit for everything to stabilize
+          setTimeout(() => {
+            if (pcRef.current && pcRef.current.signalingState === 'stable') {
+              createOffer();
+            }
+          }, 2000);
         }
       };
 
@@ -181,13 +294,30 @@ export default function VideoCall() {
     }
   };
 
+  // Handle connection failure
+  const handleConnectionFailure = () => {
+    if (retryCountRef.current < MAX_RETRIES) {
+      retryCountRef.current++;
+      console.log(`🔄 Retry attempt ${retryCountRef.current}/${MAX_RETRIES}`);
+      
+      setTimeout(() => {
+        if (callState.isCaller && pcRef.current) {
+          createOffer();
+        }
+      }, 2000 * retryCountRef.current); // Exponential backoff
+    } else {
+      setStatus('Max retries exceeded - Please refresh');
+    }
+  };
+
   // Initialize Socket
   const initializeSocket = () => {
     return new Promise((resolve, reject) => {
       try {
         const socket = io(SOCKET_URL, {
           withCredentials: true,
-          transports: ['websocket', 'polling']
+          transports: ['websocket', 'polling'],
+          timeout: 10000
         });
 
         socketRef.current = socket;
@@ -215,13 +345,19 @@ export default function VideoCall() {
 
         socket.on('connect_error', (error) => {
           console.error('❌ Socket connection error:', error);
-          setStatus('Connection failed');
+          setStatus('Connection failed - Retrying...');
           reject(error);
+        });
+
+        socket.on('disconnect', (reason) => {
+          console.log('❌ Socket disconnected:', reason);
+          setStatus('Disconnected - Reconnecting...');
         });
 
         // WebRTC Signaling - IMPROVED VERSION
         socket.on('webrtc-signal', async (data) => {
           console.log('📡 Received WebRTC signal:', data.type);
+          updateDebugInfo();
           
           if (!pcRef.current) {
             console.log('❌ No peer connection yet');
@@ -271,10 +407,11 @@ export default function VideoCall() {
             }
           } catch (error) {
             console.error('❌ Error handling signal:', error);
+            setStatus('Signal error - Retrying...');
           }
         });
 
-        // Legacy signal handler
+        // Legacy signal handler (backward compatibility)
         socket.on('signal', async (data) => {
           console.log('📡 Received legacy signal');
           if (!pcRef.current) return;
@@ -299,7 +436,7 @@ export default function VideoCall() {
         // Room events
         socket.on('user-joined', (data) => {
           console.log('👤 User joined room:', data);
-          setStatus('Partner joined');
+          setStatus('Partner joined - Connecting...');
         });
 
         socket.on('user-left', (data) => {
@@ -309,6 +446,7 @@ export default function VideoCall() {
 
         socket.on('joined-room', (data) => {
           console.log('✅ Successfully joined room');
+          setStatus(callState.isCaller ? 'Ready to call...' : 'Waiting for offer...');
         });
 
       } catch (error) {
@@ -326,11 +464,13 @@ export default function VideoCall() {
     
     try {
       console.log('🎯 Creating offer as caller...');
+      setStatus('Creating offer...');
       
       // Create offer with better options
       const offer = await pcRef.current.createOffer({
         offerToReceiveAudio: true,
-        offerToReceiveVideo: true
+        offerToReceiveVideo: true,
+        iceRestart: true
       });
       
       console.log('✅ Offer created, setting local description...');
@@ -345,16 +485,36 @@ export default function VideoCall() {
           offer: pcRef.current.localDescription
         });
         console.log('📤 Offer sent to answerer');
+        setStatus('Offer sent - Waiting for answer...');
       } else {
         console.log('❌ Socket not connected, cannot send offer');
+        setStatus('Socket error - Retrying...');
+        setTimeout(() => createOffer(), 2000);
       }
       
     } catch (error) {
       console.error('❌ Error creating offer:', error);
-      // Retry after delay
+      setStatus('Offer failed - Retrying...');
+      
+      // Retry after delay with exponential backoff
       setTimeout(() => {
-        if (pcRef.current) createOffer();
-      }, 2000);
+        if (pcRef.current && retryCountRef.current < MAX_RETRIES) {
+          createOffer();
+        }
+      }, 3000);
+    }
+  };
+
+  // Manual reconnection
+  const manualReconnect = async () => {
+    if (retryCountRef.current >= MAX_RETRIES) {
+      retryCountRef.current = 0;
+    }
+    
+    setStatus('Manual reconnection...');
+    
+    if (callState.isCaller && pcRef.current) {
+      await createOffer();
     }
   };
 
@@ -388,6 +548,8 @@ export default function VideoCall() {
         // 4. Create offer if caller
         if (callState.isCaller) {
           console.log('⏳ Waiting to create offer...');
+          setStatus('Preparing to call...');
+          
           // Give time for everything to initialize
           setTimeout(() => {
             if (mounted && pcRef.current) {
@@ -401,7 +563,7 @@ export default function VideoCall() {
 
         // Set connection timeout
         connectionTimeoutRef.current = setTimeout(() => {
-          if (mounted && !status.includes('Connected')) {
+          if (mounted && !status.includes('Connected') && retryCountRef.current < MAX_RETRIES) {
             console.log('🕒 Connection timeout, retrying...');
             if (callState.isCaller && pcRef.current) {
               createOffer();
@@ -457,7 +619,7 @@ export default function VideoCall() {
     if (!localStreamRef.current) return;
     const newMuted = !muted;
     localStreamRef.current.getAudioTracks().forEach(track => {
-      track.enabled = newMuted;
+      track.enabled = !newMuted;
     });
     setMuted(newMuted);
   };
@@ -466,7 +628,7 @@ export default function VideoCall() {
     if (!localStreamRef.current) return;
     const newVideoOff = !videoOff;
     localStreamRef.current.getVideoTracks().forEach(track => {
-      track.enabled = newVideoOff;
+      track.enabled = !newVideoOff;
     });
     setVideoOff(newVideoOff);
   };
@@ -503,27 +665,43 @@ export default function VideoCall() {
     setStatus('Retrying media...');
     
     try {
+      // Stop old tracks
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
       
+      // Get new media stream
       const stream = await initializeMedia();
-      if (stream && pcRef.current) {
+      localStreamRef.current = stream;
+      
+      // Update local video element
+      if (localRef.current) {
+        localRef.current.srcObject = stream;
+      }
+      
+      // Replace tracks in peer connection
+      if (pcRef.current) {
         const senders = pcRef.current.getSenders();
-        for (const sender of senders) {
-          if (sender.track) {
-            if (sender.track.kind === 'audio') {
-              const audioTrack = stream.getAudioTracks()[0];
-              if (audioTrack) await sender.replaceTrack(audioTrack);
-            } else if (sender.track.kind === 'video') {
-              const videoTrack = stream.getVideoTracks()[0];
-              if (videoTrack) await sender.replaceTrack(videoTrack);
-            }
-          }
+        
+        // Replace audio track
+        const audioTrack = stream.getAudioTracks()[0];
+        const audioSender = senders.find(s => s.track?.kind === 'audio');
+        if (audioSender && audioTrack) {
+          await audioSender.replaceTrack(audioTrack);
+        }
+        
+        // Replace video track  
+        const videoTrack = stream.getVideoTracks()[0];
+        const videoSender = senders.find(s => s.track?.kind === 'video');
+        if (videoSender && videoTrack) {
+          await videoSender.replaceTrack(videoTrack);
         }
       }
+      
+      setStatus('Media reconnected');
     } catch (error) {
       console.error('Failed to retry media:', error);
+      setMediaError('Failed to reconnect media: ' + error.message);
     }
   };
 
@@ -549,9 +727,12 @@ export default function VideoCall() {
 
       {/* Debug info */}
       <div className="p-2 bg-blue-50 text-xs text-blue-800 rounded">
-        <strong>Debug Info:</strong> Room: {roomId} | Backend: {SOCKET_URL} | 
-        Local Tracks: {localRef.current?.srcObject?.getTracks().length || 0} | 
-        Remote Tracks: {remoteRef.current?.srcObject?.getTracks().length || 0}
+        <strong>Debug Info:</strong> Room: {roomId} | 
+        Role: {callState.isCaller ? 'Caller' : 'Answerer'} | 
+        Signaling: {debugInfo.signalingState} | 
+        ICE: {debugInfo.iceState} | 
+        Connection: {debugInfo.connectionState} |
+        Retries: {retryCountRef.current}/{MAX_RETRIES}
       </div>
 
       <div className="p-4 bg-white rounded-lg shadow border">
@@ -598,10 +779,11 @@ export default function VideoCall() {
             ref={remoteRef} 
             autoPlay 
             playsInline
-            className="w-full h-64 md:h-80 object-cover"
+            className="w-full h-64 md:h-80 object-cover bg-gray-900"
           />
           <div className="bg-gray-800 text-white text-center p-2 text-sm">
-            {callState.partner?.name} {status === 'Connected' && '🔊'}
+            {callState.partner?.name} {status === 'Connected ✅' && '🔊'}
+            {!remoteRef.current?.srcObject && ' (Waiting for video...)'}
           </div>
         </div>
       </div>
@@ -622,6 +804,12 @@ export default function VideoCall() {
           onClick={toggleVideo}
         >
           {videoOff ? '📷 Show Video' : '📷 Hide Video'}
+        </button>
+        <button 
+          className="px-4 py-2 rounded-lg bg-yellow-600 text-white hover:bg-yellow-700 flex items-center gap-2" 
+          onClick={manualReconnect}
+        >
+          🔄 Reconnect
         </button>
         <button 
           className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 flex items-center gap-2" 
