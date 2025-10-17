@@ -26,6 +26,7 @@ export default function VideoCall() {
   const localStreamRef = useRef();
   const connectionTimeoutRef = useRef();
   const retryCountRef = useRef(0);
+  const pendingRemoteCandidatesRef = useRef([]);
 
   const [status, setStatus] = useState('Initializing...');
   const [rating, setRating] = useState(5);
@@ -246,13 +247,34 @@ export default function VideoCall() {
               type: 'answer',
               answer: pcRef.current.localDescription
             });
+
+            // Drain any queued ICE candidates
+            if (pendingRemoteCandidatesRef.current.length > 0) {
+              for (const c of pendingRemoteCandidatesRef.current) {
+                try { await pcRef.current.addIceCandidate(c); } catch (e) { console.error(e); }
+              }
+              pendingRemoteCandidatesRef.current = [];
+            }
             
           } else if (data.type === 'answer') {
             console.log('📥 Processing answer...');
             await pcRef.current.setRemoteDescription(data.answer);
+
+            // Drain any queued ICE candidates
+            if (pendingRemoteCandidatesRef.current.length > 0) {
+              for (const c of pendingRemoteCandidatesRef.current) {
+                try { await pcRef.current.addIceCandidate(c); } catch (e) { console.error(e); }
+              }
+              pendingRemoteCandidatesRef.current = [];
+            }
             
           } else if (data.type === 'candidate') {
-            await pcRef.current.addIceCandidate(data.candidate);
+            // If remote description not set yet, buffer
+            if (!pcRef.current.remoteDescription) {
+              pendingRemoteCandidatesRef.current.push(data.candidate);
+            } else {
+              await pcRef.current.addIceCandidate(data.candidate);
+            }
           }
         } catch (error) {
           console.error('Signal error:', error);
@@ -336,12 +358,12 @@ export default function VideoCall() {
         const stream = await initializeMedia();
         if (!mounted) return;
 
-        // Initialize socket
-        await initializeSocket();
+        // Initialize WebRTC first so PC is ready before signaling
+        await initializeWebRTC(stream);
         if (!mounted) return;
 
-        // Initialize WebRTC
-        await initializeWebRTC(stream);
+        // Initialize socket after PC exists to avoid race creating offers
+        await initializeSocket();
         if (!mounted) return;
 
         // Start timer
@@ -387,6 +409,10 @@ export default function VideoCall() {
       }
       
       if (socketRef.current) {
+        try {
+          const userId = localStorage.getItem('userId') || 'anonymous';
+          socketRef.current.emit('leave-room', { roomId, userId });
+        } catch (e) {}
         socketRef.current.disconnect();
       }
     };
@@ -395,21 +421,21 @@ export default function VideoCall() {
   // Control functions
   const toggleMute = () => {
     if (localStreamRef.current) {
-      const newMuted = !muted;
+      const nextMuted = !muted;
       localStreamRef.current.getAudioTracks().forEach(track => {
-        track.enabled = newMuted;
+        track.enabled = !nextMuted;
       });
-      setMuted(!newMuted);
+      setMuted(nextMuted);
     }
   };
 
   const toggleVideo = () => {
     if (localStreamRef.current) {
-      const newVideoOff = !videoOff;
+      const nextVideoOff = !videoOff;
       localStreamRef.current.getVideoTracks().forEach(track => {
-        track.enabled = newVideoOff;
+        track.enabled = !nextVideoOff;
       });
-      setVideoOff(!newVideoOff);
+      setVideoOff(nextVideoOff);
     }
   };
 
@@ -418,7 +444,13 @@ export default function VideoCall() {
       localStreamRef.current.getTracks().forEach(track => track.stop());
     }
     if (pcRef.current) pcRef.current.close();
-    if (socketRef.current) socketRef.current.disconnect();
+    if (socketRef.current) {
+      try {
+        const userId = localStorage.getItem('userId') || 'anonymous';
+        socketRef.current.emit('leave-room', { roomId, userId });
+      } catch (e) {}
+      socketRef.current.disconnect();
+    }
     navigate('/dashboard');
   };
 
