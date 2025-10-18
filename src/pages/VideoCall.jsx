@@ -120,15 +120,50 @@ export default function VideoCall() {
 
       pcRef.current = pc;
 
-      // Add local tracks
-      stream.getTracks().forEach(track => {
+      // Add local tracks with explicit audio/video handling
+      const audioTracks = stream.getAudioTracks();
+      const videoTracks = stream.getVideoTracks();
+      
+      console.log('🎵 Audio tracks:', audioTracks.length);
+      console.log('📹 Video tracks:', videoTracks.length);
+      
+      // Ensure we have both audio and video tracks
+      if (audioTracks.length === 0) {
+        console.warn('⚠️ No audio tracks found in stream!');
+      }
+      if (videoTracks.length === 0) {
+        console.warn('⚠️ No video tracks found in stream!');
+      }
+      
+      // Add audio track first to ensure it's included in SDP
+      audioTracks.forEach(track => {
+        console.log('Adding audio track:', track.label, track.enabled, track.readyState);
         pc.addTrack(track, stream);
       });
+      
+      // Add video track
+      videoTracks.forEach(track => {
+        console.log('Adding video track:', track.label, track.enabled, track.readyState);
+        pc.addTrack(track, stream);
+      });
+      
+      // Wait a moment for tracks to be properly added
+      await new Promise(resolve => setTimeout(resolve, 100));
 
       // Handle incoming remote stream - FIXED
       pc.ontrack = (event) => {
         console.log('✅ Received remote stream');
         const remoteStream = event.streams[0];
+        
+        // Debug remote stream tracks
+        const remoteAudioTracks = remoteStream.getAudioTracks();
+        const remoteVideoTracks = remoteStream.getVideoTracks();
+        console.log('🎵 Remote audio tracks:', remoteAudioTracks.length);
+        console.log('📹 Remote video tracks:', remoteVideoTracks.length);
+        
+        remoteAudioTracks.forEach(track => {
+          console.log('Remote audio track:', track.label, track.enabled, track.readyState);
+        });
         
         if (remoteRef.current && remoteStream) {
           remoteRef.current.srcObject = remoteStream;
@@ -212,8 +247,8 @@ export default function VideoCall() {
         setStatus(data.isCaller ? 'Ready to call...' : 'Waiting for call...');
         
         if (data.isCaller) {
-          // Caller creates offer after a delay
-          setTimeout(() => createOffer(), 2000);
+          // Caller creates offer after a delay to ensure tracks are ready
+          setTimeout(() => createOffer(), 3000);
         }
       });
 
@@ -223,7 +258,7 @@ export default function VideoCall() {
         setStatus('Partner joined - Connecting...');
         
         if (callState.isCaller) {
-          setTimeout(() => createOffer(), 1000);
+          setTimeout(() => createOffer(), 2000);
         }
       });
 
@@ -238,8 +273,17 @@ export default function VideoCall() {
             console.log('📥 Processing offer...');
             setStatus('Connecting...');
             
+            // Debug incoming offer SDP
+            console.log('📋 Incoming offer SDP contains audio:', data.offer.sdp.includes('m=audio'));
+            console.log('📋 Incoming offer SDP contains video:', data.offer.sdp.includes('m=video'));
+            
             await pcRef.current.setRemoteDescription(data.offer);
             const answer = await pcRef.current.createAnswer();
+            
+            // Debug answer SDP
+            console.log('📋 Answer SDP contains audio:', answer.sdp.includes('m=audio'));
+            console.log('📋 Answer SDP contains video:', answer.sdp.includes('m=video'));
+            
             await pcRef.current.setLocalDescription(answer);
             
             socket.emit('webrtc-signal', {
@@ -255,9 +299,14 @@ export default function VideoCall() {
               }
               pendingRemoteCandidatesRef.current = [];
             }
-            
+
           } else if (data.type === 'answer') {
             console.log('📥 Processing answer...');
+            
+            // Debug incoming answer SDP
+            console.log('📋 Incoming answer SDP contains audio:', data.answer.sdp.includes('m=audio'));
+            console.log('📋 Incoming answer SDP contains video:', data.answer.sdp.includes('m=video'));
+            
             await pcRef.current.setRemoteDescription(data.answer);
 
             // Drain any queued ICE candidates
@@ -305,7 +354,22 @@ export default function VideoCall() {
       console.log('🎯 Creating offer...');
       setStatus('Starting call...');
       
+      // Debug current tracks before creating offer
+      const senders = pcRef.current.getSenders();
+      console.log('📤 Current senders:', senders.length);
+      senders.forEach((sender, index) => {
+        const track = sender.track;
+        if (track) {
+          console.log(`Sender ${index}:`, track.kind, track.label, track.enabled);
+        }
+      });
+      
       const offer = await pcRef.current.createOffer();
+      
+      // Debug offer SDP for audio/video sections
+      console.log('📋 Offer SDP contains audio:', offer.sdp.includes('m=audio'));
+      console.log('📋 Offer SDP contains video:', offer.sdp.includes('m=video'));
+      
       await pcRef.current.setLocalDescription(offer);
       
       socketRef.current.emit('webrtc-signal', {
