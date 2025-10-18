@@ -35,6 +35,7 @@ export default function VideoCall() {
   const [duration, setDuration] = useState('00:00');
   const [mediaError, setMediaError] = useState('');
   const [partnerName, setPartnerName] = useState(callState.partner?.name || 'Partner');
+  const [audioTestMode, setAudioTestMode] = useState(false);
 
   const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://skillswap-backend-w0b7.onrender.com';
 
@@ -66,19 +67,64 @@ export default function VideoCall() {
     try {
       setStatus('Getting camera and microphone...');
       
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 }
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true
-        }
+      // First, check available devices
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(device => device.kind === 'audioinput');
+      const videoInputs = devices.filter(device => device.kind === 'videoinput');
+      
+      console.log('🎤 Available audio inputs:', audioInputs.length);
+      console.log('📹 Available video inputs:', videoInputs.length);
+      audioInputs.forEach((device, index) => {
+        console.log(`Audio ${index}:`, device.label || `Microphone ${index + 1}`, device.deviceId);
       });
       
+      // Try to get media with specific audio constraints
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: { ideal: 48000 },
+            channelCount: { ideal: 1 }
+          }
+        });
+      } catch (error) {
+        console.warn('Failed with specific audio constraints, trying basic audio:', error);
+        // Fallback to basic audio constraints
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
+          },
+          audio: true
+        });
+      }
+      
       localStreamRef.current = stream;
+      
+      // Debug the obtained stream
+      const audioTracks = stream.getAudioTracks();
+      const videoTracks = stream.getVideoTracks();
+      console.log('🎵 Obtained audio tracks:', audioTracks.length);
+      console.log('📹 Obtained video tracks:', videoTracks.length);
+      
+      audioTracks.forEach((track, index) => {
+        console.log(`Audio track ${index}:`, {
+          label: track.label,
+          enabled: track.enabled,
+          readyState: track.readyState,
+          muted: track.muted,
+          settings: track.getSettings()
+        });
+      });
       
       if (localRef.current) {
         localRef.current.srcObject = stream;
@@ -139,6 +185,19 @@ export default function VideoCall() {
       audioTracks.forEach(track => {
         console.log('Adding audio track:', track.label, track.enabled, track.readyState);
         pc.addTrack(track, stream);
+        
+        // Monitor audio track state changes
+        track.addEventListener('mute', () => {
+          console.warn('🔇 Audio track muted!', track.label);
+        });
+        
+        track.addEventListener('unmute', () => {
+          console.log('🔊 Audio track unmuted!', track.label);
+        });
+        
+        track.addEventListener('ended', () => {
+          console.error('❌ Audio track ended!', track.label);
+        });
       });
       
       // Add video track
@@ -409,6 +468,102 @@ export default function VideoCall() {
     }
   };
 
+  // Check audio track states
+  const checkAudioStates = () => {
+    if (localStreamRef.current) {
+      const audioTracks = localStreamRef.current.getAudioTracks();
+      console.log('🔍 Current audio track states:');
+      audioTracks.forEach((track, index) => {
+        console.log(`Track ${index}:`, {
+          label: track.label,
+          enabled: track.enabled,
+          readyState: track.readyState,
+          muted: track.muted,
+          settings: track.getSettings()
+        });
+      });
+      
+      if (pcRef.current) {
+        const senders = pcRef.current.getSenders();
+        console.log('📤 Current senders:');
+        senders.forEach((sender, index) => {
+          const track = sender.track;
+          if (track && track.kind === 'audio') {
+            console.log(`Audio sender ${index}:`, {
+              label: track.label,
+              enabled: track.enabled,
+              readyState: track.readyState,
+              muted: track.muted
+            });
+          }
+        });
+      }
+    }
+  };
+
+  // Toggle audio test mode
+  const toggleAudioTest = () => {
+    setAudioTestMode(!audioTestMode);
+    if (!audioTestMode) {
+      // Start periodic audio state checking
+      const interval = setInterval(() => {
+        if (audioTestMode) {
+          checkAudioStates();
+        } else {
+          clearInterval(interval);
+        }
+      }, 2000);
+    }
+  };
+
+  // Force reinitialize audio track
+  const reinitializeAudio = async () => {
+    try {
+      console.log('🔄 Reinitializing audio track...');
+      
+      if (localStreamRef.current) {
+        // Stop existing audio tracks
+        localStreamRef.current.getAudioTracks().forEach(track => track.stop());
+        
+        // Get new audio track
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: { ideal: 48000 },
+            channelCount: { ideal: 1 }
+          }
+        });
+        
+        const newAudioTrack = newStream.getAudioTracks()[0];
+        if (newAudioTrack && pcRef.current) {
+          // Replace the audio track in the peer connection
+          const senders = pcRef.current.getSenders();
+          const audioSender = senders.find(sender => sender.track && sender.track.kind === 'audio');
+          
+          if (audioSender) {
+            await audioSender.replaceTrack(newAudioTrack);
+            console.log('✅ Audio track replaced successfully');
+            
+            // Update local stream reference
+            localStreamRef.current = new MediaStream([
+              ...localStreamRef.current.getVideoTracks(),
+              newAudioTrack
+            ]);
+            
+            // Update local video element
+            if (localRef.current) {
+              localRef.current.srcObject = localStreamRef.current;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to reinitialize audio:', error);
+    }
+  };
+
   // Main useEffect
   useEffect(() => {
     let mounted = true;
@@ -591,6 +746,26 @@ export default function VideoCall() {
           onClick={manualReconnect}
         >
           🔄 Reconnect
+        </button>
+        <button 
+          className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
+            audioTestMode ? 'bg-green-600 text-white' : 'bg-blue-600 text-white hover:bg-blue-700'
+          }`} 
+          onClick={toggleAudioTest}
+        >
+          {audioTestMode ? '🔍 Stop Audio Test' : '🔍 Audio Test'}
+        </button>
+        <button 
+          className="px-4 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 flex items-center gap-2" 
+          onClick={checkAudioStates}
+        >
+          📊 Check Audio
+        </button>
+        <button 
+          className="px-4 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 flex items-center gap-2" 
+          onClick={reinitializeAudio}
+        >
+          🔄 Fix Audio
         </button>
         <button 
           className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 flex items-center gap-2" 
