@@ -142,15 +142,24 @@ export default function VideoCall() {
     }
   };
 
-  // Initialize WebRTC - SIMPLIFIED AND FIXED
+  // Initialize WebRTC - ENHANCED WITH BETTER ICE HANDLING
   const initializeWebRTC = async (stream) => {
     try {
       setStatus('Setting up connection...');
 
       const pc = new RTCPeerConnection({
         iceServers: [
+          // Primary STUN servers
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
+          // Additional STUN servers for better connectivity
+          { urls: 'stun:stun.stunprotocol.org:3478' },
+          { urls: 'stun:stun.ekiga.net' },
+          { urls: 'stun:stun.ideasip.com' },
+          // TURN servers for NAT traversal
           {
             urls: 'turn:openrelay.metered.ca:80',
             username: 'openrelayproject',
@@ -160,8 +169,16 @@ export default function VideoCall() {
             urls: 'turn:openrelay.metered.ca:443',
             username: 'openrelayproject',
             credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
           }
-        ]
+        ],
+        iceCandidatePoolSize: 10,
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require'
       });
 
       pcRef.current = pc;
@@ -244,22 +261,64 @@ export default function VideoCall() {
         }
       };
 
-      // Connection state handling
+      // Enhanced connection state handling
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
-        console.log('Connection state:', state);
+        console.log('🔗 Connection state:', state);
         
         if (state === 'connected') {
           setStatus('Connected ✅');
           clearTimeout(connectionTimeoutRef.current);
-        } else if (state === 'failed') {
-          setStatus('Connection failed');
+        } else if (state === 'connecting') {
+          setStatus('Connecting...');
+        } else if (state === 'disconnected') {
+          setStatus('Disconnected - Attempting reconnect...');
           handleReconnect();
+        } else if (state === 'failed') {
+          setStatus('Connection failed - Retrying...');
+          handleReconnect();
+        } else if (state === 'closed') {
+          setStatus('Connection closed');
         }
       };
 
+      // Enhanced ICE connection state monitoring
       pc.oniceconnectionstatechange = () => {
-        console.log('ICE state:', pc.iceConnectionState);
+        const iceState = pc.iceConnectionState;
+        console.log('🧊 ICE state:', iceState);
+        
+        if (iceState === 'connected' || iceState === 'completed') {
+          setStatus('Connected ✅');
+          clearTimeout(connectionTimeoutRef.current);
+        } else if (iceState === 'checking') {
+          setStatus('ICE checking...');
+        } else if (iceState === 'failed') {
+          console.warn('⚠️ ICE connection failed');
+          setStatus('ICE failed - Retrying...');
+          handleReconnect();
+        } else if (iceState === 'disconnected') {
+          setStatus('ICE disconnected - Retrying...');
+          handleReconnect();
+        } else if (iceState === 'closed') {
+          setStatus('ICE connection closed');
+        }
+      };
+
+      // ICE gathering state monitoring
+      pc.onicegatheringstatechange = () => {
+        const gatheringState = pc.iceGatheringState;
+        console.log('🔍 ICE gathering state:', gatheringState);
+        
+        if (gatheringState === 'gathering') {
+          setStatus('Gathering ICE candidates...');
+        } else if (gatheringState === 'complete') {
+          console.log('✅ ICE gathering complete');
+        }
+      };
+
+      // ICE candidate events
+      pc.onicecandidateerror = (event) => {
+        console.error('❌ ICE candidate error:', event);
       };
 
       return pc;
@@ -445,15 +504,85 @@ export default function VideoCall() {
     }
   };
 
-  // Handle reconnection
+  // Enhanced reconnection with better retry strategy
   const handleReconnect = () => {
-    if (retryCountRef.current < 3) {
+    if (retryCountRef.current < 5) { // Increased max retries
       retryCountRef.current++;
+      const delay = Math.min(2000 * Math.pow(1.5, retryCountRef.current - 1), 10000); // Exponential backoff with max 10s
+      
+      console.log(`🔄 Reconnection attempt ${retryCountRef.current}/5 in ${delay}ms`);
+      setStatus(`Reconnecting... (${retryCountRef.current}/5)`);
+      
       setTimeout(() => {
         if (callState.isCaller) {
           createOffer();
+        } else if (socketRef.current) {
+          socketRef.current.emit('request-offer', { roomId });
         }
-      }, 2000 * retryCountRef.current);
+      }, delay);
+    } else {
+      console.error('❌ Max reconnection attempts reached');
+      setStatus('Connection failed - Max retries reached');
+    }
+  };
+
+  // Test network connectivity and STUN servers
+  const testNetworkConnectivity = async () => {
+    try {
+      console.log('🌐 Testing network connectivity...');
+      setStatus('Testing network...');
+      
+      // Test basic connectivity
+      const testPc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      });
+      
+      let candidatesFound = 0;
+      let gatheringComplete = false;
+      
+      testPc.onicecandidate = (event) => {
+        if (event.candidate) {
+          candidatesFound++;
+          console.log(`🌐 Found ICE candidate ${candidatesFound}:`, event.candidate.type, event.candidate.protocol);
+        }
+      };
+      
+      testPc.onicegatheringstatechange = () => {
+        if (testPc.iceGatheringState === 'complete') {
+          gatheringComplete = true;
+          console.log(`✅ ICE gathering complete. Found ${candidatesFound} candidates`);
+          testPc.close();
+          
+          if (candidatesFound > 0) {
+            setStatus('Network test passed - Retrying connection...');
+            manualReconnect();
+          } else {
+            setStatus('Network test failed - No ICE candidates found');
+          }
+        }
+      };
+      
+      // Create a dummy offer to trigger ICE gathering
+      await testPc.createOffer();
+      await testPc.setLocalDescription(await testPc.createOffer());
+      
+      // Timeout after 5 seconds
+      setTimeout(() => {
+        if (!gatheringComplete) {
+          console.warn('⚠️ Network test timeout');
+          testPc.close();
+          setStatus('Network test timeout - Retrying anyway...');
+          manualReconnect();
+        }
+      }, 5000);
+      
+    } catch (error) {
+      console.error('❌ Network test failed:', error);
+      setStatus('Network test failed - Retrying anyway...');
+      manualReconnect();
     }
   };
 
@@ -596,13 +725,14 @@ export default function VideoCall() {
           }
         }, 1000);
 
-        // Connection timeout
+        // Enhanced connection timeout with progressive delays
         connectionTimeoutRef.current = setTimeout(() => {
           if (mounted && !status.includes('Connected')) {
-            console.log('⏰ Connection timeout');
+            console.log('⏰ Connection timeout - attempting reconnect');
+            setStatus('Connection timeout - Retrying...');
             manualReconnect();
           }
-        }, 10000);
+        }, 15000); // Increased timeout to 15 seconds
 
       } catch (error) {
         if (mounted) {
@@ -746,6 +876,12 @@ export default function VideoCall() {
           onClick={manualReconnect}
         >
           🔄 Reconnect
+        </button>
+        <button 
+          className="px-4 py-2 rounded-lg bg-cyan-600 text-white hover:bg-cyan-700 flex items-center gap-2" 
+          onClick={testNetworkConnectivity}
+        >
+          🌐 Test Network
         </button>
         <button 
           className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
