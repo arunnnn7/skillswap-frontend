@@ -330,18 +330,36 @@ export default function VideoCall() {
     }
   };
 
-  // Initialize Socket
+  // Initialize Socket with optimized configuration
   const initializeSocket = () => {
     return new Promise((resolve, reject) => {
       const socket = io(SOCKET_URL, {
         withCredentials: true,
-        transports: ['websocket', 'polling']
+        transports: ['websocket', 'polling'],
+        // Match backend timeout settings
+        timeout: 30000,           // 30 seconds - connection timeout
+        pingTimeout: 30000,       // 30 seconds - ping timeout
+        pingInterval: 20000,      // 20 seconds - ping interval
+        upgradeTimeout: 10000,    // 10 seconds - upgrade timeout
+        // Reconnection settings
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        maxReconnectionAttempts: 5,
+        // Connection state recovery
+        forceNew: false,
+        // Additional options for stability
+        autoConnect: true,
+        multiplex: true
       });
 
       socketRef.current = socket;
 
+      // Connection events with enhanced monitoring
       socket.on('connect', () => {
-        console.log('✅ Socket connected');
+        console.log('✅ Socket connected:', socket.id);
+        setStatus('Socket connected');
         
         const userId = getValidUserId();
         const userData = localStorage.getItem('user');
@@ -354,9 +372,58 @@ export default function VideoCall() {
       });
 
       socket.on('connect_error', (error) => {
-        console.error('Socket error:', error);
-        setStatus('Connection failed');
+        console.error('❌ Socket connection error:', error);
+        setStatus('Socket connection failed');
         reject(error);
+      });
+
+      socket.on('disconnect', (reason) => {
+        console.log('🔌 Socket disconnected:', reason);
+        if (reason === 'io server disconnect') {
+          // Server initiated disconnect, try to reconnect
+          setStatus('Server disconnected - Reconnecting...');
+          socket.connect();
+        } else {
+          setStatus('Connection lost - Attempting reconnect...');
+        }
+      });
+
+      socket.on('reconnect', (attemptNumber) => {
+        console.log('🔄 Socket reconnected after', attemptNumber, 'attempts');
+        setStatus('Reconnected successfully');
+        
+        // Re-register user after reconnection
+        const userId = getValidUserId();
+        const userData = localStorage.getItem('user');
+        const userName = userData ? JSON.parse(userData).name : 'User';
+        
+        socket.emit('register-user', { userId, userName });
+        socket.emit('join-room', { roomId, userId, userName });
+      });
+
+      socket.on('reconnect_attempt', (attemptNumber) => {
+        console.log('🔄 Reconnection attempt:', attemptNumber);
+        setStatus(`Reconnecting... (${attemptNumber}/5)`);
+      });
+
+      socket.on('reconnect_error', (error) => {
+        console.error('❌ Reconnection error:', error);
+        setStatus('Reconnection failed');
+      });
+
+      socket.on('reconnect_failed', () => {
+        console.error('❌ All reconnection attempts failed');
+        setStatus('Connection failed - Please refresh');
+      });
+
+      // Connection health monitoring
+      socket.on('ping', () => {
+        console.log('🏓 Received ping from server');
+        socket.emit('pong');
+      });
+
+      socket.on('pong', () => {
+        console.log('🏓 Received pong from server');
       });
 
       // Room events
@@ -523,6 +590,29 @@ export default function VideoCall() {
     } else {
       console.error('❌ Max reconnection attempts reached');
       setStatus('Connection failed - Max retries reached');
+    }
+  };
+
+  // Test Socket.IO connection health
+  const testSocketHealth = () => {
+    if (socketRef.current) {
+      const socket = socketRef.current;
+      console.log('🔍 Socket health check:');
+      console.log('- Connected:', socket.connected);
+      console.log('- ID:', socket.id);
+      console.log('- Transport:', socket.io.engine.transport.name);
+      console.log('- Ready state:', socket.io.engine.readyState);
+      
+      // Send ping to test connection
+      socket.emit('ping');
+      
+      if (socket.connected) {
+        setStatus('Socket health: Good ✅');
+      } else {
+        setStatus('Socket health: Disconnected ❌');
+      }
+    } else {
+      setStatus('Socket health: Not initialized ❌');
     }
   };
 
@@ -882,6 +972,12 @@ export default function VideoCall() {
           onClick={testNetworkConnectivity}
         >
           🌐 Test Network
+        </button>
+        <button 
+          className="px-4 py-2 rounded-lg bg-teal-600 text-white hover:bg-teal-700 flex items-center gap-2" 
+          onClick={testSocketHealth}
+        >
+          🔍 Socket Health
         </button>
         <button 
           className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
