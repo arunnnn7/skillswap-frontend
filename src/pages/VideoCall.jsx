@@ -142,24 +142,15 @@ export default function VideoCall() {
     }
   };
 
-  // Initialize WebRTC - ENHANCED WITH BETTER ICE HANDLING
+  // Initialize WebRTC - SIMPLIFIED AND FIXED
   const initializeWebRTC = async (stream) => {
     try {
       setStatus('Setting up connection...');
 
       const pc = new RTCPeerConnection({
         iceServers: [
-          // Primary STUN servers
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:stun4.l.google.com:19302' },
-          // Additional STUN servers for better connectivity
-          { urls: 'stun:stun.stunprotocol.org:3478' },
-          { urls: 'stun:stun.ekiga.net' },
-          { urls: 'stun:stun.ideasip.com' },
-          // TURN servers for NAT traversal
           {
             urls: 'turn:openrelay.metered.ca:80',
             username: 'openrelayproject',
@@ -169,16 +160,8 @@ export default function VideoCall() {
             urls: 'turn:openrelay.metered.ca:443',
             username: 'openrelayproject',
             credential: 'openrelayproject'
-          },
-          {
-            urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
           }
-        ],
-        iceCandidatePoolSize: 10,
-        bundlePolicy: 'max-bundle',
-        rtcpMuxPolicy: 'require'
+        ]
       });
 
       pcRef.current = pc;
@@ -261,64 +244,22 @@ export default function VideoCall() {
         }
       };
 
-      // Enhanced connection state handling
+      // Connection state handling
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
-        console.log('🔗 Connection state:', state);
+        console.log('Connection state:', state);
         
         if (state === 'connected') {
           setStatus('Connected ✅');
           clearTimeout(connectionTimeoutRef.current);
-        } else if (state === 'connecting') {
-          setStatus('Connecting...');
-        } else if (state === 'disconnected') {
-          setStatus('Disconnected - Attempting reconnect...');
-          handleReconnect();
         } else if (state === 'failed') {
-          setStatus('Connection failed - Retrying...');
+          setStatus('Connection failed');
           handleReconnect();
-        } else if (state === 'closed') {
-          setStatus('Connection closed');
         }
       };
 
-      // Enhanced ICE connection state monitoring
       pc.oniceconnectionstatechange = () => {
-        const iceState = pc.iceConnectionState;
-        console.log('🧊 ICE state:', iceState);
-        
-        if (iceState === 'connected' || iceState === 'completed') {
-          setStatus('Connected ✅');
-          clearTimeout(connectionTimeoutRef.current);
-        } else if (iceState === 'checking') {
-          setStatus('ICE checking...');
-        } else if (iceState === 'failed') {
-          console.warn('⚠️ ICE connection failed');
-          setStatus('ICE failed - Retrying...');
-          handleReconnect();
-        } else if (iceState === 'disconnected') {
-          setStatus('ICE disconnected - Retrying...');
-          handleReconnect();
-        } else if (iceState === 'closed') {
-          setStatus('ICE connection closed');
-        }
-      };
-
-      // ICE gathering state monitoring
-      pc.onicegatheringstatechange = () => {
-        const gatheringState = pc.iceGatheringState;
-        console.log('🔍 ICE gathering state:', gatheringState);
-        
-        if (gatheringState === 'gathering') {
-          setStatus('Gathering ICE candidates...');
-        } else if (gatheringState === 'complete') {
-          console.log('✅ ICE gathering complete');
-        }
-      };
-
-      // ICE candidate events
-      pc.onicecandidateerror = (event) => {
-        console.error('❌ ICE candidate error:', event);
+        console.log('ICE state:', pc.iceConnectionState);
       };
 
       return pc;
@@ -330,36 +271,18 @@ export default function VideoCall() {
     }
   };
 
-  // Initialize Socket with optimized configuration
+  // Initialize Socket
   const initializeSocket = () => {
     return new Promise((resolve, reject) => {
       const socket = io(SOCKET_URL, {
         withCredentials: true,
-        transports: ['websocket', 'polling'],
-        // Match backend timeout settings
-        timeout: 30000,           // 30 seconds - connection timeout
-        pingTimeout: 30000,       // 30 seconds - ping timeout
-        pingInterval: 20000,      // 20 seconds - ping interval
-        upgradeTimeout: 10000,    // 10 seconds - upgrade timeout
-        // Reconnection settings
-        reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 1000,
-        reconnectionDelayMax: 5000,
-        maxReconnectionAttempts: 5,
-        // Connection state recovery
-        forceNew: false,
-        // Additional options for stability
-        autoConnect: true,
-        multiplex: true
+        transports: ['websocket', 'polling']
       });
 
       socketRef.current = socket;
 
-      // Connection events with enhanced monitoring
       socket.on('connect', () => {
-        console.log('✅ Socket connected:', socket.id);
-        setStatus('Socket connected');
+        console.log('✅ Socket connected');
         
         const userId = getValidUserId();
         const userData = localStorage.getItem('user');
@@ -372,58 +295,9 @@ export default function VideoCall() {
       });
 
       socket.on('connect_error', (error) => {
-        console.error('❌ Socket connection error:', error);
-        setStatus('Socket connection failed');
+        console.error('Socket error:', error);
+        setStatus('Connection failed');
         reject(error);
-      });
-
-      socket.on('disconnect', (reason) => {
-        console.log('🔌 Socket disconnected:', reason);
-        if (reason === 'io server disconnect') {
-          // Server initiated disconnect, try to reconnect
-          setStatus('Server disconnected - Reconnecting...');
-          socket.connect();
-        } else {
-          setStatus('Connection lost - Attempting reconnect...');
-        }
-      });
-
-      socket.on('reconnect', (attemptNumber) => {
-        console.log('🔄 Socket reconnected after', attemptNumber, 'attempts');
-        setStatus('Reconnected successfully');
-        
-        // Re-register user after reconnection
-        const userId = getValidUserId();
-        const userData = localStorage.getItem('user');
-        const userName = userData ? JSON.parse(userData).name : 'User';
-        
-        socket.emit('register-user', { userId, userName });
-        socket.emit('join-room', { roomId, userId, userName });
-      });
-
-      socket.on('reconnect_attempt', (attemptNumber) => {
-        console.log('🔄 Reconnection attempt:', attemptNumber);
-        setStatus(`Reconnecting... (${attemptNumber}/5)`);
-      });
-
-      socket.on('reconnect_error', (error) => {
-        console.error('❌ Reconnection error:', error);
-        setStatus('Reconnection failed');
-      });
-
-      socket.on('reconnect_failed', () => {
-        console.error('❌ All reconnection attempts failed');
-        setStatus('Connection failed - Please refresh');
-      });
-
-      // Connection health monitoring
-      socket.on('ping', () => {
-        console.log('🏓 Received ping from server');
-        socket.emit('pong');
-      });
-
-      socket.on('pong', () => {
-        console.log('🏓 Received pong from server');
       });
 
       // Room events
@@ -571,108 +445,15 @@ export default function VideoCall() {
     }
   };
 
-  // Enhanced reconnection with better retry strategy
+  // Handle reconnection
   const handleReconnect = () => {
-    if (retryCountRef.current < 5) { // Increased max retries
+    if (retryCountRef.current < 3) {
       retryCountRef.current++;
-      const delay = Math.min(2000 * Math.pow(1.5, retryCountRef.current - 1), 10000); // Exponential backoff with max 10s
-      
-      console.log(`🔄 Reconnection attempt ${retryCountRef.current}/5 in ${delay}ms`);
-      setStatus(`Reconnecting... (${retryCountRef.current}/5)`);
-      
       setTimeout(() => {
         if (callState.isCaller) {
           createOffer();
-        } else if (socketRef.current) {
-          socketRef.current.emit('request-offer', { roomId });
         }
-      }, delay);
-    } else {
-      console.error('❌ Max reconnection attempts reached');
-      setStatus('Connection failed - Max retries reached');
-    }
-  };
-
-  // Test Socket.IO connection health
-  const testSocketHealth = () => {
-    if (socketRef.current) {
-      const socket = socketRef.current;
-      console.log('🔍 Socket health check:');
-      console.log('- Connected:', socket.connected);
-      console.log('- ID:', socket.id);
-      console.log('- Transport:', socket.io.engine.transport.name);
-      console.log('- Ready state:', socket.io.engine.readyState);
-      
-      // Send ping to test connection
-      socket.emit('ping');
-      
-      if (socket.connected) {
-        setStatus('Socket health: Good ✅');
-      } else {
-        setStatus('Socket health: Disconnected ❌');
-      }
-    } else {
-      setStatus('Socket health: Not initialized ❌');
-    }
-  };
-
-  // Test network connectivity and STUN servers
-  const testNetworkConnectivity = async () => {
-    try {
-      console.log('🌐 Testing network connectivity...');
-      setStatus('Testing network...');
-      
-      // Test basic connectivity
-      const testPc = new RTCPeerConnection({
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-      });
-      
-      let candidatesFound = 0;
-      let gatheringComplete = false;
-      
-      testPc.onicecandidate = (event) => {
-        if (event.candidate) {
-          candidatesFound++;
-          console.log(`🌐 Found ICE candidate ${candidatesFound}:`, event.candidate.type, event.candidate.protocol);
-        }
-      };
-      
-      testPc.onicegatheringstatechange = () => {
-        if (testPc.iceGatheringState === 'complete') {
-          gatheringComplete = true;
-          console.log(`✅ ICE gathering complete. Found ${candidatesFound} candidates`);
-          testPc.close();
-          
-          if (candidatesFound > 0) {
-            setStatus('Network test passed - Retrying connection...');
-            manualReconnect();
-          } else {
-            setStatus('Network test failed - No ICE candidates found');
-          }
-        }
-      };
-      
-      // Create a dummy offer to trigger ICE gathering
-      await testPc.createOffer();
-      await testPc.setLocalDescription(await testPc.createOffer());
-      
-      // Timeout after 5 seconds
-      setTimeout(() => {
-        if (!gatheringComplete) {
-          console.warn('⚠️ Network test timeout');
-          testPc.close();
-          setStatus('Network test timeout - Retrying anyway...');
-          manualReconnect();
-        }
-      }, 5000);
-      
-    } catch (error) {
-      console.error('❌ Network test failed:', error);
-      setStatus('Network test failed - Retrying anyway...');
-      manualReconnect();
+      }, 2000 * retryCountRef.current);
     }
   };
 
@@ -815,14 +596,13 @@ export default function VideoCall() {
           }
         }, 1000);
 
-        // Enhanced connection timeout with progressive delays
+        // Connection timeout
         connectionTimeoutRef.current = setTimeout(() => {
           if (mounted && !status.includes('Connected')) {
-            console.log('⏰ Connection timeout - attempting reconnect');
-            setStatus('Connection timeout - Retrying...');
+            console.log('⏰ Connection timeout');
             manualReconnect();
           }
-        }, 15000); // Increased timeout to 15 seconds
+        }, 10000);
 
       } catch (error) {
         if (mounted) {
@@ -966,18 +746,6 @@ export default function VideoCall() {
           onClick={manualReconnect}
         >
           🔄 Reconnect
-        </button>
-        <button 
-          className="px-4 py-2 rounded-lg bg-cyan-600 text-white hover:bg-cyan-700 flex items-center gap-2" 
-          onClick={testNetworkConnectivity}
-        >
-          🌐 Test Network
-        </button>
-        <button 
-          className="px-4 py-2 rounded-lg bg-teal-600 text-white hover:bg-teal-700 flex items-center gap-2" 
-          onClick={testSocketHealth}
-        >
-          🔍 Socket Health
         </button>
         <button 
           className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
